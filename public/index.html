@@ -106,6 +106,12 @@
           <label class="inline" data-field="date">日期<input id="convert-date" type="date"></label>
           <label class="inline" data-field="time">时刻<input id="convert-time" placeholder="例如 09:30" maxlength="5"></label>
           <label class="inline" data-field="zoneId">来源时区<select id="convert-zone"></select></label>
+          <label class="inline hidden" id="convert-occurrence-field" data-field="occurrence">出现次序
+            <select id="convert-occurrence">
+              <option value="first">第一次出现</option>
+              <option value="second">第二次出现</option>
+            </select>
+          </label>
           <button type="button" id="convert-run">换算一遍</button>
         </div>
       </div>

@@ -41,7 +41,7 @@ async function request(path, options) {
 function notify(message, kind) {
   const box = el('notice');
   box.textContent = message;
-  box.className = `notice ${kind === 'ok' ? 'ok' : 'error'}`;
+  box.className = kind === 'ok' ? 'notice ok' : kind === 'warn' ? 'notice' : 'notice error';
 }
 
 function clearNotice() {
@@ -246,6 +246,11 @@ async function submitZone(event) {
   }
 }
 
+// 出现次序只在来源时区切换当天的重复段里有意义，平时藏起，命中重复段才亮出来
+function toggleOccurrence(show) {
+  el('convert-occurrence-field').classList.toggle('hidden', !show);
+}
+
 async function runConvert() {
   clearNotice();
   const payload = {
@@ -253,18 +258,34 @@ async function runConvert() {
     time: el('convert-time').value,
     zoneId: el('convert-zone').value,
   };
+  if (!el('convert-occurrence-field').classList.contains('hidden')) {
+    payload.occurrence = el('convert-occurrence').value;
+  }
   try {
     const result = await request('/api/convert', { method: 'POST', body: JSON.stringify(payload) });
     state.lastConvert = result;
+    toggleOccurrence(Boolean(result.input.boundary));
+    if (result.input.boundary) el('convert-occurrence').value = result.input.boundary.occurrence;
     renderConvert(result);
   } catch (err) {
+    if (err.code === 'TIME_REPEATED') {
+      toggleOccurrence(true);
+      notify(err.message, 'warn');
+      el('convert-occurrence').focus();
+      return;
+    }
+    toggleOccurrence(false);
     notify(err.message, 'error');
     markField(err.field);
   }
 }
 
 function renderConvert(result) {
-  el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.offsetText}）的 ${result.input.date} ${result.input.time}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${Math.floor(result.maxDiffMinutes / 60)} 小时 ${result.maxDiffMinutes % 60} 分`;
+  const boundary = result.input.boundary;
+  const boundaryNote = boundary
+    ? `（该时刻落在来源时区切换当天的重复段 ${boundary.rangeText} 里，按${boundary.occurrenceText}（${boundary.offsetText}）换算，${boundary.otherOccurrenceText}则按 ${boundary.otherOffsetText} 计）`
+    : '';
+  el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.offsetText}）的 ${result.input.date} ${result.input.time}${boundaryNote}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${Math.floor(result.maxDiffMinutes / 60)} 小时 ${result.maxDiffMinutes % 60} 分`;
   const body = el('convert-body');
   body.innerHTML = result.results.map((item) => `<tr class="${item.isSource ? 'source-row' : ''}">
       <td class="mono">${escapeHtml(item.name)}</td>
@@ -275,7 +296,7 @@ function renderConvert(result) {
       <td><span class="tag ${item.dayOffset === 0 ? 'off' : 'warn'}">${escapeHtml(item.dayOffsetText)}</span></td>
       <td class="mono">${escapeHtml(item.offsetText)}</td>
       <td>${escapeHtml(item.diffText)}</td>
-      <td>${item.usesDst ? '有规则' : '—'}</td>
+      <td>${item.isSource && boundary ? `<span class="tag warn">按${escapeHtml(boundary.occurrenceText)}</span>` : item.usesDst ? '有规则' : '—'}</td>
     </tr>`).join('');
   el('convert-empty').classList.toggle('hidden', result.results.length > 0);
 }
@@ -330,6 +351,13 @@ el('zone-filter-dst').addEventListener('change', () => {
   loadZones().catch((err) => notify(err.message, 'error'));
 });
 el('convert-run').addEventListener('click', runConvert);
+// 改了日期、时刻或来源时区，之前的重复段判定就不一定成立了，出现次序先收起来
+['convert-date', 'convert-time'].forEach((id) => {
+  el(id).addEventListener('input', () => toggleOccurrence(false));
+});
+el('convert-zone').addEventListener('change', () => toggleOccurrence(false));
+// 切换第几次出现时直接按新选择重算一遍，两次对应的瞬间不同
+el('convert-occurrence').addEventListener('change', runConvert);
 el('operator').addEventListener('change', () => {
   window.localStorage.setItem(OPERATOR_KEY, currentOperator());
 });
