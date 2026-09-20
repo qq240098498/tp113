@@ -1,6 +1,7 @@
 const { load, WEEKDAY_NAMES } = require('./store');
 const { ApiError, pickText } = require('./errors');
 const { offsetText } = require('./zones');
+const { classifyLocal, offsetAt } = require('./dst');
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -36,6 +37,25 @@ function validateTime(value) {
   return { text: time, hour, minute };
 }
 
+// 重复出现的时刻要指明按第几次出现换算，只能是一或二；留空时按第一次
+function validateOccurrence(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const num = Number(value);
+  if (num !== 1 && num !== 2) {
+    throw new ApiError(400, 'OCCURRENCE_INVALID', '重复出现的时刻只能按第一次或第二次出现换算', 'occurrence');
+  }
+  return num;
+}
+
+// 把一毫秒数按基准口径拆成日期与时刻两串，当地墙钟与基准时刻都靠它
+function wallParts(ms) {
+  const at = new Date(ms);
+  return {
+    date: `${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}-${pad(at.getUTCDate())}`,
+    time: `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())}`,
+  };
+}
+
 // 时差写法：整小时只写小时，带分钟的把分钟也写出来
 function diffText(minutes) {
   if (minutes === 0) return '与源时区相同';
@@ -55,34 +75,95 @@ function dayOffsetText(dayOffset) {
   return `前 ${Math.abs(dayOffset)} 天`;
 }
 
-// 换算：先把输入时刻按来源时区的偏移折算成基准时刻，再逐个时区加上各自的偏移
+// 切换日边界说明：不存在的时刻给出跳过的区间；重复的时刻给出两次出现各自
+// 对应的基准瞬间，两次是不同的瞬间；正常时刻只标个正常
+function buildBoundary(source, classified) {
+  if (classified.kind === 'gap') {
+    const gap = classified.gap;
+    const start = gap ? wallParts(gap.startLocalMs) : null;
+    const end = gap ? wallParts(gap.endLocalMs) : null;
+    const beforeOffsetText = offsetText(source.offsetMinutes);
+    const afterOffsetText = offsetText(source.dstOffsetMinutes);
+    return {
+      kind: 'gap',
+      message: start && end
+        ? `这个时刻在来源时区不存在：${start.date} 当天时钟从 ${start.time} 直接拨到 ${end.time}（${beforeOffsetText} 换成 ${afterOffsetText}），${start.time} 至 ${end.time} 这一段在当地不会出现`
+        : '这个时刻在来源时区不存在：切换当天时钟向前拨快，这一段在当地不会出现',
+      gap: start && end ? {
+        startDate: start.date,
+        startTime: start.time,
+        endDate: end.date,
+        endTime: end.time,
+        beforeOffsetText,
+        afterOffsetText,
+        shiftMinutes: source.dstOffsetMinutes - source.offsetMinutes,
+      } : null,
+      occurrences: null,
+    };
+  }
+  if (classified.kind === 'overlap') {
+    const occurrence = (item, order) => ({
+      order,
+      offsetMinutes: item.offsetMinutes,
+      offsetText: offsetText(item.offsetMinutes),
+      dstActive: item.offsetMinutes === source.dstOffsetMinutes,
+      standard: wallParts(item.utcMs),
+    });
+    const occurrences = [occurrence(classified.first, 1), occurrence(classified.second, 2)];
+    return {
+      kind: 'overlap',
+      message: `这个时刻在来源时区会出现两次：第一次按夏令时 ${occurrences[0].offsetText} 算，对应基准 ${occurrences[0].standard.date} ${occurrences[0].standard.time}；第二次按标准时 ${occurrences[1].offsetText} 算，对应基准 ${occurrences[1].standard.date} ${occurrences[1].standard.time}，两次对应不同的瞬间`,
+      gap: null,
+      occurrences,
+    };
+  }
+  return { kind: 'normal', message: '', gap: null, occurrences: null };
+}
+
+// 换算：先把输入时刻按来源时区当年的实际偏移折算成基准时刻，再逐个时区按各自的实际偏移落地。
+// 输入时刻落在切换当天被跳过的一段时没有基准时刻可算，换算结果留空，只带回边界说明
 function convert(options) {
   const input = options && typeof options === 'object' ? options : {};
   const date = validateDate(input.date);
   const time = validateTime(input.time);
   const zoneId = pickText(input.zoneId);
   if (!zoneId) throw new ApiError(400, 'ZONE_REQUIRED', '请选择来源时区', 'zoneId');
+  const occurrence = validateOccurrence(input.occurrence);
 
   const data = load();
   const source = data.zones.find((item) => item.id === zoneId);
   if (!source) throw new ApiError(404, 'ZONE_NOT_FOUND', '选中的时区没有登记过', 'zoneId');
 
-  const baseMs = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute);
-  const utcMs = baseMs - source.offsetMinutes * 60000;
-  const baseDay = Math.floor(baseMs / DAY_MS);
-  const utcDate = new Date(utcMs);
+  const localMs = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute);
+  const baseDay = Math.floor(localMs / DAY_MS);
+  const classified = classifyLocal(source, localMs);
+  const boundary = buildBoundary(source, classified);
 
-  const results = data.zones.map((zone) => {
-    const localMs = utcMs + zone.offsetMinutes * 60000;
-    const local = new Date(localMs);
-    const dayOffset = Math.floor(localMs / DAY_MS) - baseDay;
-    const diffMinutes = zone.offsetMinutes - source.offsetMinutes;
+  let utcMs = null;
+  let sourceOffset = null;
+  let occurrenceUsed = null;
+  if (classified.kind === 'normal') {
+    sourceOffset = classified.offsetMinutes;
+    utcMs = classified.utcMs;
+  } else if (classified.kind === 'overlap') {
+    occurrenceUsed = occurrence || 1;
+    const chosen = occurrenceUsed === 2 ? classified.second : classified.first;
+    sourceOffset = chosen.offsetMinutes;
+    utcMs = chosen.utcMs;
+  }
+
+  const results = utcMs === null ? [] : data.zones.map((zone) => {
+    const zoneOffset = offsetAt(zone, utcMs);
+    const rowLocalMs = utcMs + zoneOffset * 60000;
+    const local = new Date(rowLocalMs);
+    const dayOffset = Math.floor(rowLocalMs / DAY_MS) - baseDay;
+    const diffMinutes = zoneOffset - sourceOffset;
     return {
       zoneId: zone.id,
       name: zone.name,
       displayName: zone.displayName,
-      offsetMinutes: zone.offsetMinutes,
-      offsetText: offsetText(zone.offsetMinutes),
+      offsetMinutes: zoneOffset,
+      offsetText: offsetText(zoneOffset),
       localDate: `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())}`,
       localTime: `${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`,
       weekday: WEEKDAY_NAMES[local.getUTCDay()],
@@ -91,6 +172,7 @@ function convert(options) {
       diffMinutes,
       diffText: diffText(diffMinutes),
       usesDst: zone.usesDst,
+      dstActive: zone.usesDst && zone.dstOffsetMinutes !== null && zoneOffset === zone.dstOffsetMinutes,
       isSource: zone.id === source.id,
     };
   });
@@ -107,13 +189,14 @@ function convert(options) {
       zoneId: source.id,
       zoneName: source.name,
       zoneDisplayName: source.displayName,
-      offsetText: offsetText(source.offsetMinutes),
+      offsetMinutes: sourceOffset,
+      offsetText: sourceOffset === null ? '' : offsetText(sourceOffset),
+      dstActive: source.usesDst && sourceOffset !== null && sourceOffset === source.dstOffsetMinutes,
+      occurrence: occurrenceUsed,
       usesDst: source.usesDst,
     },
-    standard: {
-      date: `${utcDate.getUTCFullYear()}-${pad(utcDate.getUTCMonth() + 1)}-${pad(utcDate.getUTCDate())}`,
-      time: `${pad(utcDate.getUTCHours())}:${pad(utcDate.getUTCMinutes())}`,
-    },
+    boundary,
+    standard: utcMs === null ? null : wallParts(utcMs),
     zonesInScope: data.zones.length,
     crossDayCount: results.filter((item) => item.dayOffset !== 0).length,
     maxDiffMinutes: results.reduce((acc, item) => Math.max(acc, Math.abs(item.diffMinutes)), 0),
@@ -122,4 +205,4 @@ function convert(options) {
   };
 }
 
-module.exports = { convert, validateDate, validateTime, diffText, dayOffsetText };
+module.exports = { convert, validateDate, validateTime, validateOccurrence, diffText, dayOffsetText };

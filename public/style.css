@@ -203,6 +203,46 @@ button.link.danger {
   font-size: 12.5px;
 }
 
+.boundary {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn-line);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: #8a5a00;
+  font-size: 13px;
+}
+
+.boundary.error {
+  border-color: #f0c2c2;
+  background: #fdeeee;
+  color: var(--danger);
+}
+
+.boundary p {
+  margin: 4px 0 0;
+}
+
+.boundary strong {
+  display: block;
+}
+
+.occurrence-options {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+label.occurrence {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .table-wrap {
   overflow-x: auto;
 }

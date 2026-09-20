@@ -253,6 +253,8 @@ async function runConvert() {
     time: el('convert-time').value,
     zoneId: el('convert-zone').value,
   };
+  const picked = document.querySelector('input[name="convert-occurrence"]:checked');
+  if (picked) payload.occurrence = picked.value;
   try {
     const result = await request('/api/convert', { method: 'POST', body: JSON.stringify(payload) });
     state.lastConvert = result;
@@ -263,8 +265,39 @@ async function runConvert() {
   }
 }
 
+// 切换日边界提示：不存在的时刻亮出跳过的区间；重复的时刻列出两次出现，
+// 各自对应不同的基准瞬间，选中哪次就按哪次重新换算
+function renderBoundary(result) {
+  const box = el('convert-boundary');
+  const boundary = result.boundary || { kind: 'normal' };
+  if (boundary.kind === 'gap') {
+    box.className = 'boundary error';
+    box.innerHTML = `<strong>不存在的时刻</strong><p>${escapeHtml(boundary.message)}</p>`;
+    return;
+  }
+  if (boundary.kind === 'overlap') {
+    const options = boundary.occurrences.map((item) => {
+      const checked = result.input.occurrence === item.order ? ' checked' : '';
+      const label = item.order === 1 ? '第一次出现' : '第二次出现';
+      const kind = item.dstActive ? '夏令时' : '标准时';
+      return `<label class="occurrence"><input type="radio" name="convert-occurrence" value="${item.order}"${checked}> ${label}：按${kind} ${escapeHtml(item.offsetText)} 算，对应基准 ${escapeHtml(item.standard.date)} ${escapeHtml(item.standard.time)}</label>`;
+    }).join('');
+    box.className = 'boundary warn';
+    box.innerHTML = `<strong>重复出现的时刻</strong><p>${escapeHtml(boundary.message)}</p><div class="occurrence-options">${options}</div>`;
+    return;
+  }
+  box.className = 'boundary hidden';
+  box.innerHTML = '';
+}
+
 function renderConvert(result) {
-  el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.offsetText}）的 ${result.input.date} ${result.input.time}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${Math.floor(result.maxDiffMinutes / 60)} 小时 ${result.maxDiffMinutes % 60} 分`;
+  renderBoundary(result);
+  const gap = result.boundary && result.boundary.kind === 'gap';
+  if (gap) {
+    el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}）的 ${result.input.date} ${result.input.time} 在当地不存在，没有可换算的结果`;
+  } else {
+    el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.offsetText}）的 ${result.input.date} ${result.input.time}，对应基准 ${result.standard.date} ${result.standard.time}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${Math.floor(result.maxDiffMinutes / 60)} 小时 ${result.maxDiffMinutes % 60} 分`;
+  }
   const body = el('convert-body');
   body.innerHTML = result.results.map((item) => `<tr class="${item.isSource ? 'source-row' : ''}">
       <td class="mono">${escapeHtml(item.name)}</td>
@@ -275,8 +308,9 @@ function renderConvert(result) {
       <td><span class="tag ${item.dayOffset === 0 ? 'off' : 'warn'}">${escapeHtml(item.dayOffsetText)}</span></td>
       <td class="mono">${escapeHtml(item.offsetText)}</td>
       <td>${escapeHtml(item.diffText)}</td>
-      <td>${item.usesDst ? '有规则' : '—'}</td>
+      <td>${item.usesDst ? (item.dstActive ? '<span class="tag on">实行中</span>' : '<span class="tag off">未在实行期</span>') : '—'}</td>
     </tr>`).join('');
+  el('convert-empty').textContent = gap ? '这个时刻在来源时区不存在，没有可换算的结果' : '还没有换算结果';
   el('convert-empty').classList.toggle('hidden', result.results.length > 0);
 }
 
@@ -330,6 +364,9 @@ el('zone-filter-dst').addEventListener('change', () => {
   loadZones().catch((err) => notify(err.message, 'error'));
 });
 el('convert-run').addEventListener('click', runConvert);
+el('convert-boundary').addEventListener('change', (event) => {
+  if (event.target.name === 'convert-occurrence') runConvert();
+});
 el('operator').addEventListener('change', () => {
   window.localStorage.setItem(OPERATOR_KEY, currentOperator());
 });
